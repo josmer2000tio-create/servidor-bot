@@ -1,0 +1,127 @@
+const express = require('express');
+const cors = require('cors');
+const fetch = require('node-fetch');
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+// TU CLAVE PRIVADA DE BUZZMASTER (Solo vivirá en tu servidor)
+const BUZZMASTER_API_KEY = process.env.BUZZMASTER_API_KEY || "bzh_fcf7ed553f1d22cf3e5bddd9693143903af76bffa76293f5877267af3e4e8da7";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "ADMIN1234";
+
+// BASE DE DATOS EN MEMORIA (Saldos por Licencia)
+// Puedes agregar licencias aquí o crearlas por la API de Admin
+let baseDeDatosUsuarios = {
+  "LICENCIA-ACTIVA-MANUEL": { nombre: "Manuel", saldo: 10.00, activo: true }
+};
+
+// 1. Consultar saldo interno del cliente
+app.get('/api/saldo', (req, res) => {
+  const clave = req.query.clave ? req.query.clave.trim().toUpperCase() : '';
+  const usuario = baseDeDatosUsuarios[clave];
+
+  if (!usuario || !usuario.activo) {
+    return res.json({ éxito: false, mensaje: "Licencia inactiva o no registrada." });
+  }
+
+  res.json({
+    éxito: true,
+    cliente: usuario.nombre,
+    saldo: usuario.saldo
+  });
+});
+
+// 2. Obtener productos de Buzzmaster
+app.get('/api/productos', async (req, res) => {
+  try {
+    const response = await fetch(`https://buzzmaster.market/api/v2/products?api_key=${BUZZMASTER_API_KEY}`);
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.json({ éxito: false, mensaje: "Error al obtener productos del proveedor" });
+  }
+});
+
+// 3. Comprar producto (Descuenta de tu Buzzmaster y del saldo del cliente)
+app.post('/api/comprar', async (req, res) => {
+  const { clave, productId, cantidad } = req.body;
+  const claveLimpia = clave ? clave.trim().toUpperCase() : '';
+  const usuario = baseDeDatosUsuarios[claveLimpia];
+
+  if (!usuario || !usuario.activo) {
+    return res.json({ éxito: false, mensaje: "Licencia no válida" });
+  }
+
+  // Consulta el catálogo para saber el costo real
+  let precioUnidad = 0.50; // Precio base estimado o personalizado
+  const costoTotalCliente = precioUnidad * cantidad;
+
+  if (usuario.saldo < costoTotalCliente) {
+    return res.json({
+      éxito: false,
+      mensaje: `Saldo insuficiente en tu cuenta ($${usuario.saldo.toFixed(2)} USD). Necesitas $${costoTotalCliente.toFixed(2)} USD.`
+    });
+  }
+
+  try {
+    // Petición a Buzzmaster usando TU API Key
+    const response = await fetch('https://buzzmaster.market/api/v2/buy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: BUZZMASTER_API_KEY,
+        product_id: productId,
+        cantidad: cantidad
+      })
+    });
+
+    const data = await response.json();
+
+    if (data && (data.success || data.éxito)) {
+      // Restar saldo al cliente
+      usuario.saldo -= costoTotalCliente;
+      const creds = data.orden?.credenciales || data.credentials || JSON.stringify(data);
+
+      res.json({
+        éxito: true,
+        credenciales: creds,
+        nuevoSaldo: usuario.saldo
+      });
+    } else {
+      res.json({ éxito: false, mensaje: data.message || data.mensaje || "Proveedor sin stock o error de saldo" });
+    }
+  } catch (err) {
+    res.json({ éxito: false, mensaje: "Error de servidor al procesar la compra" });
+  }
+});
+
+// 4. Panel de Admin para RECARGAR SALDO a un cliente
+app.post('/api/admin/recargar', (req, res) => {
+  const { adminKey, claveLicencia, monto, nombreCliente } = req.body;
+
+  if (adminKey !== ADMIN_PASSWORD) {
+    return res.status(401).json({ éxito: false, mensaje: "Contraseña de Admin incorrecta" });
+  }
+
+  const claveLimpia = claveLicencia.trim().toUpperCase();
+
+  if (!baseDeDatosUsuarios[claveLimpia]) {
+    baseDeDatosUsuarios[claveLimpia] = {
+      nombre: nombreCliente || "Cliente",
+      saldo: 0.00,
+      activo: true
+    };
+  }
+
+  baseDeDatosUsuarios[claveLimpia].saldo += parseFloat(monto);
+
+  res.json({
+    éxito: true,
+    mensaje: `¡Saldo recargado con éxito a ${baseDeDatosUsuarios[claveLimpia].nombre}!`,
+    nuevoSaldo: baseDeDatosUsuarios[claveLimpia].saldo
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Servidor activo en el puerto ${PORT}`));
